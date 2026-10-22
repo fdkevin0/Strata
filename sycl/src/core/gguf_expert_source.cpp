@@ -7,7 +7,15 @@
 #include <cstring>
 #include <utility>
 #include <fcntl.h>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <io.h>
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 #include <dpct/dpct.hpp>
 #include <sycl/sycl.hpp>
 #include <thread>
@@ -16,6 +24,42 @@ namespace strata::core {
 
 namespace {
 constexpr size_t kRing = 512;   // blobs alive at once: the prompt path holds a layer's worth of streamed experts
+
+// The GGUF files are read by offset from several threads at once.  POSIX: open / pread / close.  Windows (the native
+// build, sycl/tools/build_windows.bat): a CRT descriptor whose handle is read with an OVERLAPPED offset, which, like
+// pread, takes no shared file position; the path is UTF-8 (the engine's manifest makes that the ANSI code page).
+int open_ro(const std::string& name) {
+#if defined(_WIN32)
+    return ::_open(name.c_str(), _O_RDONLY | _O_BINARY | _O_NOINHERIT);
+#else
+    return ::open(name.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
+}
+
+void close_fd(int fd) {
+#if defined(_WIN32)
+    ::_close(fd);
+#else
+    ::close(fd);
+#endif
+}
+
+// bytes read at `off` (0 at the end of the file, < 0 on an error)
+int64_t read_at(int fd, void* dst, size_t n, uint64_t off) {
+#if defined(_WIN32)
+    const HANDLE h = (HANDLE) ::_get_osfhandle(fd);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    OVERLAPPED ov{};
+    ov.Offset = (DWORD) (off & 0xffffffffu);
+    ov.OffsetHigh = (DWORD) (off >> 32);
+    DWORD got = 0;
+    const DWORD want = (DWORD) std::min<size_t>(n, (size_t) 1 << 30);
+    if (!::ReadFile(h, dst, want, &got, &ov)) return ::GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+    return (int64_t) got;
+#else
+    return (int64_t) ::pread(fd, dst, n, (off_t) off);
+#endif
+}
 }
 
 GgufExpertSource::~GgufExpertSource() { close(); }
@@ -24,7 +68,7 @@ void GgufExpertSource::close() {
     for (uint8_t* c : mirror_chunks_) if (c) sycl::free(c, dpct::get_in_order_queue());
     mirror_chunks_.clear();
     mirror_bytes_ = 0; mirror_ptr_.clear(); layer_first_.clear();
-    for (int fd : fds_) if (fd >= 0) ::close(fd);
+    for (int fd : fds_) if (fd >= 0) close_fd(fd);
     fds_.clear(); names_.clear(); layer_fd_.clear(); ring_.clear(); ring_key_.clear(); where_.clear();
     ring_next_ = 0;
 }
@@ -68,7 +112,7 @@ int GgufExpertSource::fd_of(int64_t layer, int role, std::string& err) {
     if (lay.gguf_file.size() > i && !lay.gguf_file[i].empty()) name = dir_ + lay.gguf_file[i];
     for (size_t k = 0; k < names_.size(); ++k)
         if (names_[k] == name) { layer_fd_[i] = (int) k; return fds_[k]; }
-    const int fd = ::open(name.c_str(), O_RDONLY | O_CLOEXEC);
+    const int fd = open_ro(name);
     if (fd < 0) { err = "--stream-experts: cannot open " + name; return -1; }
     names_.push_back(name);
     fds_.push_back(fd);
@@ -106,7 +150,7 @@ const uint8_t* GgufExpertSource::blob(int64_t layer, int64_t expert) {
         const uint64_t src = lay.gguf_off[(size_t) (3 * layer + r)] + per[r] * (uint64_t) expert;
         uint64_t done = 0;
         while (done < per[r]) {
-            const ssize_t n = ::pread(fd, buf.data() + at[r] + done, (size_t) (per[r] - done), (off_t) (src + done));
+            const int64_t n = read_at(fd, buf.data() + at[r] + done, (size_t) (per[r] - done), src + done);
             if (n <= 0) { std::lock_guard<std::mutex> lk(mu_); where_.erase(key); ring_key_[slot] = -1; return nullptr; }
             done += (uint64_t) n;
         }
@@ -228,7 +272,7 @@ bool GgufExpertSource::read_into(int64_t layer, int64_t expert, uint8_t* dst, si
         const uint64_t src = lay.gguf_off[(size_t) (3 * layer + r)] + per[r] * (uint64_t) expert;
         uint64_t done = 0;
         while (done < per[r]) {
-            const ssize_t n = ::pread(fd, dst + at[r] + done, (size_t) (per[r] - done), (off_t) (src + done));
+            const int64_t n = read_at(fd, dst + at[r] + done, (size_t) (per[r] - done), src + done);
             if (n <= 0) return false;
             done += (uint64_t) n;
         }

@@ -23,7 +23,7 @@ A backend name alone is not a target. Each row is an OS x CPU ABI x backend tupl
 | `linux-x86_64-cuda` | AppImage (Tauri) | `setup.py`; built in a glibc 2.35 chroot | **cuda13 built and tested** (RTX 3060 and RTX A4000: app in the browser, a real model, a picture). cuda12 built. |
 | `linux-x86_64-hip` | AppImage (Tauri) | `packaging/build_hip_linux.sh` | **RX 9000 (gfx1200 / gfx1201) built and tested** on a Radeon AI PRO R9700. **RX 7000 (gfx1100 / 1101 / 1102) built; not run on an RX 7000 card.** **RX 6000 (gfx1030 / 1031, 0.2.2, engine package `rx6000` only) built; not tested on a real RX 6000 card.** |
 | `linux-x86_64-sycl` | | `sycl/setup_intel.py` | Documented as experimental ([INTEL.md](../docs/INTEL.md)). |
-| `windows-x86_64-sycl` | none | none | **gated.** No native Windows SYCL path exists upstream; it needs a separate feasibility gate, not a recipe. |
+| `windows-x86_64-sycl` | none | `sycl/tools/build_windows.bat` (zip: `sycl/tools/package_windows.py`) | **recipe written; never built with oneAPI for Windows, never run on an Arc.** The native build path ([INTEL_ARC.md](../docs/INTEL_ARC.md#windows)); experimental. |
 | `macos-x86_64-*` | none | none | **unsupported.** The macOS engine is Apple-Silicon only (`metal/CMakeLists.txt` requires Apple Silicon for the Metal runtime). |
 
 **Cross-compilation is not attempted for the desktop app.** Tauri bundles are per-OS and the

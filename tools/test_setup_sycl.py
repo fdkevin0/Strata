@@ -32,12 +32,16 @@ def run(argv, win):
 
 
 class SyclBackend(unittest.TestCase):
-    def test_windows_stops_with_the_docs_pointer(self):
-        rc, out, call = run(["--backend", "sycl"], win=True)
-        self.assertEqual(rc, ("exit", 1))
+    def test_windows_hands_over_too_and_says_it_is_experimental(self):
+        rc, out, call = run(["--model", "IQ2_XS", "--backend", "sycl"], win=True)
+        self.assertEqual(rc, 0)
         self.assertIn("supported since 0.1.40.2", out)
+        self.assertIn("EXPERIMENTAL", out)
+        self.assertIn("build_windows.bat", out)
         self.assertIn("docs/INTEL_ARC.md", out)
-        call.assert_not_called()
+        cmd = call.call_args[0][0]
+        self.assertTrue(cmd[1].endswith(str(Path("sycl") / "setup_intel.py")))
+        self.assertEqual(cmd[2:], ["--model", "IQ2_XS"])
 
     def test_linux_hands_over_to_setup_intel_without_the_backend_flag(self):
         rc, out, call = run(["--model", "IQ2_XS", "--backend", "sycl", "--port", "8085"], win=False)
@@ -311,6 +315,130 @@ class ToSycl(unittest.TestCase):
             m.S.combined_embeddings_path(Path("/tmp/x"), 10)
             m.S.combined_embeddings_path(Path("/tmp/x"), 10)
         self.assertEqual(out.getvalue().count("/dev/shm has no room"), 1)
+
+
+class WindowsIntel(unittest.TestCase):
+    """sycl/setup_intel.py on Windows (experimental): the Arc from the display adapters, the native engine from
+    sycl/tools/build_windows.bat with the host's paths, and strata-sycl.sh's settings in the config's env."""
+
+    @staticmethod
+    def mod():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("setup_intel", ROOT / "sycl" / "setup_intel.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def cfg(self, extra=()):
+        return {"exe": "x", "cwd": "y", "lib_dirs": ["z"], "args": ["--pack", "C:/m/pack", "--native", "C:/m/a.gguf",
+                                                                  "--expert-cache", "auto", "--prefill", "auto",
+                                                                  "--max-context", "32768", "--kv", "int8", *extra]}
+
+    ADAPTERS = [{"vendor": "8086", "device": 0x7D55, "name": "Intel(R) Arc(TM) Graphics", "vram_gb": 0.1},
+                {"vendor": "8086", "device": 0xE20B, "name": "Intel(R) Arc(TM) B580 Graphics", "vram_gb": 11.9},
+                {"vendor": "8086", "device": 0x56A0, "name": "Intel(R) Arc(TM) A770 Graphics", "vram_gb": 0.0}]
+
+    def test_the_arc_cards_come_from_the_display_adapters_and_the_integrated_gpu_is_left_out(self):
+        m = self.mod()
+        with mock.patch.object(m.S, "WIN", True):
+            found = m.windows_intel_gpus(self.ADAPTERS)
+        self.assertEqual([g["name"] for g in found], ["Intel Arc B580", "Intel Arc A770"])
+        self.assertEqual([g["vram_gb"] for g in found], [12.0, 16.0])
+        self.assertEqual([g["devid"] for g in found], ["e20b", "56a0"])
+        self.assertEqual({g["driver"] for g in found}, {"windows"})
+
+    def test_the_engine_is_the_packaged_exe_and_a_missing_one_says_how_to_build_it(self):
+        m = self.mod()
+        with mock.patch.object(m.S, "WIN", True), tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(m.os.environ, {"STRATA_SYCL_EXE": str(Path(d) / "strata.exe")}):
+            exe, why = m.sycl_engine()
+            self.assertIsNone(exe)
+            self.assertIn("build_windows.bat", why)
+            (Path(d) / "strata.exe").write_bytes(b"MZ")
+            exe, why = m.sycl_engine()
+            self.assertEqual(exe, Path(d) / "strata.exe")
+            self.assertIsNone(why)
+
+    def test_battlemage_config_runs_the_exe_with_host_paths_and_the_launchers_settings(self):
+        m = self.mod()
+        exe = Path("C:/s/dist/strata-windows-x64-sycl/strata.exe")
+        with mock.patch.object(m.S, "WIN", True):
+            c = m.to_sycl(self.cfg(), exe, 64.0, {}, 12.0, "windows", "e20b")
+        self.assertEqual(c["exe"], str(exe))
+        self.assertEqual(c["backend"], "sycl")
+        self.assertEqual(c["lib_dirs"], [])
+        self.assertNotIn("sycl_root", c)
+        self.assertNotIn("/work/", " ".join(c["args"]))
+        self.assertIn("--stream-experts", c["args"])
+        for k, v in {"STRATA_VERIFY_DEVICE_PLAN": "1", "STRATA_VERIFY_NO_HOST": "1", "STRATA_STAGER_THREADS": "12",
+                     "SYCL_CACHE_PERSISTENT": "0"}.items():
+            self.assertEqual(c["env"][k], v)
+        self.assertNotIn("IGC_EnableDPEmulation", c["env"])
+        self.assertNotIn("STRATA_SYCL_BIN", c["env"])
+
+    def test_an_alchemist_streams_too_and_gets_the_fp64_emulation(self):
+        m = self.mod()
+        with mock.patch.object(m.S, "WIN", True):
+            c = m.to_sycl(self.cfg(), Path("C:/e/strata.exe"), 64.0, {}, 16.0, "windows", "56a0")
+        self.assertIn("--stream-experts", c["args"])
+        self.assertEqual(c["env"]["IGC_EnableDPEmulation"], "1")
+        self.assertEqual(c["env"]["STRATA_VERIFY_NO_HOST"], "1")
+
+
+class SyclWindowsHelpers(unittest.TestCase):
+    """strata_control/sycl_windows.py: the Arc's Level Zero index from sycl-ls, and the engine's env."""
+
+    LS = """[level_zero:gpu][level_zero:0] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) Graphics 12.71.4 [1.6.31896.500000]
+[level_zero:gpu][level_zero:1] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) B580 Graphics 20.1.0 [1.6.31896.500000]
+[opencl:cpu][opencl:0] Intel(R) OpenCL, Intel(R) Core(TM) Ultra 7 155H OpenCL 3.0 (Build 0) [2025.19.4.0.18_160000.xmain-hotfix]
+[opencl:gpu][opencl:1] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) B580 Graphics OpenCL 3.0 NEO  [32.0.101.6979]
+"""
+
+    def test_the_card_is_found_by_its_model_past_the_integrated_gpu(self):
+        from strata_control import sycl_windows as sw
+        self.assertEqual(sw.level_zero_gpus(self.LS)[1][0], 1)
+        self.assertEqual(sw.level_zero_index(self.LS, "Intel Arc B580"), 1)
+        self.assertIsNone(sw.level_zero_index(self.LS, "Intel Arc A770"))
+        self.assertIsNone(sw.level_zero_index(self.LS, "Intel GPU 1234"))
+        two = self.LS + "[level_zero:gpu][level_zero:2] Intel(R) Level-Zero, Intel(R) Arc(TM) B580 Graphics 20.1.0\n"
+        self.assertIsNone(sw.level_zero_index(two, "Intel Arc B580"))     # two of the same: the caller's own choice stands
+        pro = "[level_zero:gpu][level_zero:0] Intel(R) Level-Zero, Intel(R) Arc(TM) Pro B60 Graphics 20.1.0\n"
+        self.assertEqual(sw.level_zero_index(pro, "Intel Arc Pro B60"), 0)
+
+    def test_engine_env(self):
+        from strata_control import sycl_windows as sw
+        env = sw.engine_env("battlemage", "level_zero:1")
+        self.assertEqual(env["ONEAPI_DEVICE_SELECTOR"], "level_zero:1")
+        self.assertNotIn("NEOReadDebugKeys", env)
+        self.assertEqual(sw.engine_env("alchemist")["ONEAPI_DEVICE_SELECTOR"], "level_zero:gpu")
+        self.assertEqual(sw.engine_env("alchemist")["OverrideDefaultFP64Settings"], "1")
+        self.assertEqual(sw.engine_env("", "level_zero:1", split=True)["STRATA_STAGE_TRIM"], "1")
+
+
+class WindowsPackage(unittest.TestCase):
+    """sycl/tools/package_windows.py's DLL walk: imports followed through the oneAPI folders, Windows' and the Intel
+    driver's DLLs left alone, the C++ runtime set apart, an import found nowhere reported."""
+
+    def test_closure(self):
+        sys.path.insert(0, str(ROOT / "sycl" / "tools"))
+        import package_windows as pw
+        table = {"strata.exe": ["sycl8.dll", "KERNEL32.dll", "MSVCP140.dll", "mkl_sycl_blas.5.dll", "ze_loader.dll"],
+                 "sycl8.dll": ["ur_loader.dll", "VCRUNTIME140.dll", "api-ms-win-crt-runtime-l1-1-0.dll"],
+                 "ur_loader.dll": ["umf.dll"], "umf.dll": [], "mkl_sycl_blas.5.dll": ["mkl_core.2.dll", "sycl8.dll"],
+                 "mkl_core.2.dll": ["libmmd.dll"], "libmmd.dll": [],
+                 "ur_adapter_level_zero.dll": ["ur_loader.dll", "ze_loader.dll", "gone.dll"]}
+        with tempfile.TemporaryDirectory() as d:
+            one, two = Path(d) / "compiler", Path(d) / "mkl"
+            one.mkdir(); two.mkdir()
+            for n in ("sycl8.dll", "ur_loader.dll", "umf.dll", "ur_adapter_level_zero.dll", "libmmd.dll"):
+                (one / n).write_bytes(b"MZ")
+            for n in ("mkl_sycl_blas.5.dll", "mkl_core.2.dll"):
+                (two / n).write_bytes(b"MZ")
+            imports = lambda f: table.get(Path(f).name, [])  # noqa: E731
+            need, crt, missing = pw.closure([Path(d) / "strata.exe", one / "ur_adapter_level_zero.dll"], [one, two], imports)
+        self.assertEqual(sorted(need), ["libmmd.dll", "mkl_core.2.dll", "mkl_sycl_blas.5.dll", "sycl8.dll", "umf.dll", "ur_loader.dll"])
+        self.assertEqual(crt, {"msvcp140.dll", "vcruntime140.dll"})
+        self.assertEqual(missing, ["gone.dll"])
 
 
 if __name__ == "__main__":

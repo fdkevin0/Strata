@@ -636,14 +636,49 @@ def windows_amd_cards(adapters: list[dict] | None = None) -> list[dict]:
 
 
 def _windows_vendor_backend(adapters: list[dict] | None = None) -> str | None:
-    """Windows without nvidia-smi / hipInfo on PATH: the display adapters decide, NVIDIA first, then an AMD card (an AMD
-    integrated GPU alone is not one), as on Linux. Read-only registry, nothing is run."""
+    """Windows without nvidia-smi / hipInfo / sycl-ls on PATH: the display adapters decide, NVIDIA first, then an AMD card
+    (an AMD integrated GPU alone is not one), then an Intel Arc card (an Intel integrated GPU alone is not one), as on
+    Linux. Read-only registry, nothing is run."""
     adapters = windows_display_adapters() if adapters is None else adapters
     if any(a.get("vendor") == "10de" for a in adapters):
         return "cuda"
     if windows_amd_cards(adapters):
         return "hip"
+    if windows_intel_cards(adapters):
+        return "sycl"
     return None
+
+
+#: Windows Intel Arc cards by PCI device id (VEN_8086): (name, VRAM GB, family). The same ids as sycl/setup_intel.py's INTEL_ARC
+#: (tests/terminal/test_engine_component.py keeps the two equal). "alchemist" is the A-series (no FP64 hardware), "battlemage"
+#: the B-series. Integrated Intel graphics (UHD, Iris Xe, the Core Ultra "Arc Graphics" / "Arc 140V") are not in it.
+WIN_INTEL_ARC = {0xE223: ("Arc Pro B70", 32.0, "battlemage"), 0xE221: ("Arc Pro B60", 24.0, "battlemage"),
+                 0xE211: ("Arc Pro B60", 24.0, "battlemage"), 0xE20B: ("Arc B580", 12.0, "battlemage"),
+                 0xE20C: ("Arc B570", 10.0, "battlemage"), 0xE212: ("Arc B50", 16.0, "battlemage"),
+                 0x56A0: ("Arc A770", 16.0, "alchemist"), 0x56A1: ("Arc A750", 8.0, "alchemist"),
+                 0x56A2: ("Arc A580", 8.0, "alchemist"), 0x56A5: ("Arc A380", 6.0, "alchemist"),
+                 0x56A6: ("Arc A310", 4.0, "alchemist"), 0x5690: ("Arc A770M", 16.0, "alchemist")}
+
+
+def windows_intel_cards(adapters: list[dict] | None = None) -> list[dict]:
+    """The Intel Arc graphics cards among the Windows display adapters, each with "family" ("alchemist" / "battlemage") and its
+    VRAM (the table's, else the adapter's own). An id outside the table counts when the driver names it a discrete Arc
+    ("Arc ... A770" / "Arc ... B580": a letter and three digits) and it has 3 GB or more of its own memory; its family is then
+    read from the letter. Integrated graphics never count."""
+    adapters = windows_display_adapters() if adapters is None else adapters
+    found = []
+    for a in adapters:
+        if a.get("vendor") != "8086":
+            continue
+        known = WIN_INTEL_ARC.get(int(a.get("device") or 0))
+        if known:
+            name, vram, family = known
+            found.append({**a, "name": a.get("name") or f"Intel {name}", "vram_gb": a.get("vram_gb") or vram, "family": family})
+            continue
+        m = re.search(r"\bARC\b.*?\b(?:PRO )?([AB])\d{2,3}M?\b", str(a.get("name") or "").upper())
+        if m and float(a.get("vram_gb") or 0) >= 3:
+            found.append({**a, "family": "alchemist" if m.group(1) == "A" else "battlemage"})
+    return found
 
 
 def cuda_archs_present(environ=None) -> list[str]:

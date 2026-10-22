@@ -282,6 +282,33 @@ class WindowsAmd(unittest.TestCase):
         with mock.patch.object(ec.shutil, "which", lambda name: None), mock.patch.object(ec.os, "name", "nt"),                 mock.patch.object(ec, "host_platform", return_value="windows-x86_64"),                 mock.patch.object(ec, "windows_display_adapters", return_value=self.TESTER_A):
             self.assertEqual(ec.detect_backend({}), ("hip", "display adapters"))
 
+    ARC_BESIDE_IGPU = [{"vendor": "8086", "device": 0x7D55, "name": "Intel(R) Arc(TM) Graphics", "vram_gb": 0.1},
+                       {"vendor": "8086", "device": 0xE20B, "name": "Intel(R) Arc(TM) B580 Graphics", "vram_gb": 11.9}]
+    INTEL_IGPU_ONLY = [{"vendor": "8086", "device": 0x7D55, "name": "Intel(R) Arc(TM) Graphics", "vram_gb": 0.1},
+                       {"vendor": "8086", "device": 0x64A0, "name": "Intel(R) Arc(TM) 140V GPU (16GB)", "vram_gb": 16.0}]
+
+    def test_an_intel_arc_card_is_sycl_and_integrated_intel_graphics_is_not(self):
+        self.assertEqual(ec._windows_vendor_backend(self.ARC_BESIDE_IGPU), "sycl")
+        self.assertEqual([(c["device"], c["family"]) for c in ec.windows_intel_cards(self.ARC_BESIDE_IGPU)], [(0xE20B, "battlemage")])
+        self.assertIsNone(ec._windows_vendor_backend(self.INTEL_IGPU_ONLY))
+        self.assertEqual(ec._windows_vendor_backend(self.TESTER_A + self.ARC_BESIDE_IGPU), "hip")   # AMD first, as on Linux
+
+    def test_an_unknown_arc_id_counts_by_its_name_and_memory(self):
+        cards = ec.windows_intel_cards([{"vendor": "8086", "device": 0x1234, "name": "Intel(R) Arc(TM) Pro B65 Graphics", "vram_gb": 24.0},
+                                        {"vendor": "8086", "device": 0x1235, "name": "Intel(R) Arc(TM) A999 Graphics", "vram_gb": 1.0}])
+        self.assertEqual([(c["device"], c["family"]) for c in cards], [(0x1234, "battlemage")])
+
+    def test_the_arc_table_is_the_one_setup_intel_uses(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("setup_intel", Path(__file__).resolve().parents[2] / "sycl" / "setup_intel.py")
+        si = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(si)
+        self.assertEqual({k: v[:2] for k, v in ec.WIN_INTEL_ARC.items()}, {int(k, 16): v for k, v in si.INTEL_ARC.items()})
+        self.assertEqual({k for k, v in ec.WIN_INTEL_ARC.items() if v[2] == "alchemist"}, {int(k, 16) for k in si.ALCHEMIST_IDS})
+
+    def test_sycl_is_a_windows_backend(self):
+        self.assertIn("windows-x86_64", ec.BACKEND_MATRIX["sycl"])
+
     def test_the_arch_table_is_the_one_setup_uses(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         import setup as strata_setup

@@ -53,7 +53,8 @@ def sha256(path: Path) -> str:
 def wanted(path: Path) -> bool:
     name = path.name.lower()
     return (name.endswith((".dll", ".so", ".dylib", ".metallib")) or ".so." in name or name == "build.json"
-            or name.startswith("license") or name in ("strata-vision", "strata-vision.exe", "strata-vision-hip", "strata-vision-hip.exe"))   # the picture readers (CPU, AMD GPU) beside the engine
+            or name.startswith("license") or name in ("strata-vision", "strata-vision.exe", "strata-vision-hip", "strata-vision-hip.exe")   # the picture readers (CPU, AMD GPU) beside the engine
+            or name == "sycl-ls.exe")   # the Windows Intel package's device lister (strata_control/sycl_windows.py picks the Arc with it)
 
 
 def git_build_id(repo: Path = ROOT) -> str:

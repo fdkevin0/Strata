@@ -11,6 +11,7 @@ Only the GSQ-RCO families (qwen, swift, coder) are adopted this way; images stay
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -37,6 +38,25 @@ def intel_driver() -> str:
         except OSError:
             continue
     return ""
+
+
+def windows_sycl_env() -> dict:
+    """The Windows Intel engine's settings (strata_control/sycl_windows.py): on Linux its launcher sets them, on Windows the
+    config carries them. The card is the first Intel Arc among the display adapters, its Level Zero index read from sycl-ls
+    (beside the installed engine or on PATH) when that names it."""
+    from strata_control import engine_component as ec, sycl_windows as sw
+    try:
+        cards = ec.windows_intel_cards()
+    except Exception:                                       # noqa: BLE001 - an unreadable registry leaves the defaults
+        cards = []
+    card = cards[0] if cards else {}
+    engine_dir = None
+    try:
+        engine_dir = Path(ec.resolve(full=False).root)
+    except Exception:                                       # noqa: BLE001 - no engine yet: sycl-ls on PATH, or the default
+        pass
+    index = sw.level_zero_index(sw.sycl_ls_output(engine_dir), card.get("name", "")) if card else None
+    return sw.engine_env(card.get("family", ""), f"level_zero:{index}" if index is not None else "")
 
 
 def find_shards(folder: Path) -> list[Path]:
@@ -107,6 +127,8 @@ def plan(*, family: str, model: str, model_dir: Path, data_dir: Path, src: Path,
            "log": str(log), "lib_dirs": [], "port": 8080}
     if backend == "metal":
         cfg["env"] = {"STRATA_METAL_STREAM": "1"}
+    if backend == "sycl" and os.name == "nt":
+        cfg["env"] = windows_sycl_env()
     if backend:
         cfg["backend"] = backend
     return cfg, []
