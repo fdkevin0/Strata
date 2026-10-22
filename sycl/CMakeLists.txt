@@ -107,7 +107,7 @@ if(WIN32)
   # files on cl as llama.cpp's own Windows SYCL build does, so every flag here is C++-only.  -fsycl and the -fsycl-* /
   # -Xsycl-* options are the same on both systems; -fp-model=precise is spelled /fp:precise, and the SYCL runtime needs
   # the DLL C runtime (the default /MD).
-  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${_sycl_flags};/fp:precise;-Wno-unused-parameter;-Wno-unused-variable;-Wno-deprecated-declarations>"
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${_sycl_flags};/fp:precise;-Wno-unused-parameter;-Wno-unused-variable;-Wno-deprecated-declarations;-Wno-macro-redefined>"
                       "$<$<COMPILE_LANGUAGE:CXX>:/EHsc;/bigobj>")
   add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
