@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -51,7 +52,9 @@ def install_shared_embeddings():
     """Pictures: the engine runs in a container, and a request's image embeddings reach it as a file named on its GENI line.
     serve/server.py writes that file to /dev/shm when that has room, and strata-sycl.sh shares the host's /dev/shm with the
     container, so the path means the same on both sides.  Anywhere else (a full /dev/shm) the container cannot see the file:
-    said once, in the log, in plain words."""
+    said once, in the log, in plain words.  On Windows the engine runs on the host (no container), so any path is fine."""
+    if os.name == "nt":
+        return
     orig = S.combined_embeddings_path
     said = []
 

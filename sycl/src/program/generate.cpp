@@ -92,6 +92,17 @@ namespace strata::prefill { void set_nonresident_share(double share); }   // SYC
 #include <windows.h>
 #include <psapi.h>
 #include <io.h>
+#ifdef small
+#undef small   // rpcndr.h (through windows.h) defines it as char; the port names a chunk size `small`
+#endif
+#include <algorithm>
+// no memmem in the Windows C runtime: the STRATA_VERIFY_FIND diagnostic's byte search
+static const void* memmem(const void* hay, size_t n, const void* needle, size_t m) {
+    if (m == 0) return hay;
+    const unsigned char* h = (const unsigned char*) hay;
+    const unsigned char* e = std::search(h, h + n, (const unsigned char*) needle, (const unsigned char*) needle + m);
+    return e == h + n ? nullptr : e;
+}
 #else
 #include <unistd.h>
 #include <cerrno>

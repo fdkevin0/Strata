@@ -21,6 +21,11 @@ setup.py's, unchanged.  What is replaced:
   - the config: the container's paths, the SYCL flags, backend "sycl"; the run script starts
     sycl/serve/server_intel.py (serve/server.py plus the Intel Monitor readings and the model menu).
 
+Windows (experimental): no container.  The card comes from the display adapters (strata_control/engine_component.py,
+windows_intel_cards), the engine is dist/strata-windows-x64-sycl/strata.exe from sycl/tools/build_windows.bat (the oneAPI DLLs
+beside it), started directly with the host's paths, and the settings strata-sycl.sh gives the engine on Linux travel in the
+config's "env" (strata_control/sycl_windows.py), with the Arc's Level Zero index read from sycl-ls.
+
 When setup.py changes the steps this relies on, this stops with a message rather than writing a wrong config.
 """
 from __future__ import annotations
@@ -59,7 +64,10 @@ ALCHEMIST_IDS = frozenset({"56a0", "56a1", "56a2", "56a5", "56a6", "5690"})
 
 def intel_gpus():
     """Intel discrete GPUs from sysfs: vendor 0x8086 under the xe or i915 driver, named by PCI device id. VRAM comes
-    from the id table, else from the size of the card's VRAM BAR."""
+    from the id table, else from the size of the card's VRAM BAR.  On Windows: the Arc cards among the display adapters,
+    with "windows" as the driver (the A-series is told apart by its id, as on xe)."""
+    if S.WIN:
+        return windows_intel_gpus()
     found = []
     for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
         if "-" in card.name:                            # connectors (card0-DP-1) share the card's device
@@ -89,16 +97,36 @@ def intel_gpus():
     return found
 
 
+def windows_intel_gpus(adapters=None):
+    """intel_gpus() on Windows: the registry's display adapters (no sysfs), named by this file's id table first."""
+    from strata_control import engine_component as ec
+    found = []
+    for c in ec.windows_intel_cards(adapters):
+        devid = f"{int(c.get('device') or 0):04x}"
+        name, vram = INTEL_ARC.get(devid, (None, 0.0))
+        found.append({"index": len(found), "name": f"Intel {name}" if name else (c.get("name") or f"Intel GPU {devid}"),
+                      "vram_gb": vram or float(c.get("vram_gb") or 0.0), "arch": "windows", "driver": "windows",
+                      "devid": devid, "family": c.get("family", "")})
+    return found
+
+
 def real_mem_have(mem_have, real_ram: float, fake_ram: float):
     """setup.mem_have for the Intel path: the RAM it is given is the 1024 GB stand-in of setup's RAM rule, so a model that counts VRAM + RAM
     (Gyro) would never warn; it gets the real RAM."""
     return lambda model, ram, vram=0.0: mem_have(model, real_ram if ram >= fake_ram else ram, vram)
 
 
+WIN_ENGINE = ROOT / "dist" / "strata-windows-x64-sycl" / "strata.exe"   # sycl\tools\build_windows.bat: the engine and its oneAPI DLLs
+
+
 def sycl_engine():
     """The SYCL build: (binary, why-not)."""
     if S.WIN:
-        return None, "the SYCL port runs on Linux only"
+        exe = Path(os.environ["STRATA_SYCL_EXE"]) if os.environ.get("STRATA_SYCL_EXE") else WIN_ENGINE
+        if not exe.is_file():
+            return None, (f"{exe} is not there (docs/INTEL_ARC.md, \"Windows\": build it with sycl\\tools\\build_windows.bat, "
+                          "which also puts the oneAPI DLLs beside it)")
+        return exe, None
     exe = next((b for b in (ROOT / "build-sycl-aot" / "strata", ROOT / "build-sycl" / "strata") if b.exists()), None)
     if exe is None:
         return None, "it is not built (docs/INTEL.md, \"How to build it\": Docker, then sycl/tools/build.sh in the image)"
@@ -107,7 +135,9 @@ def sycl_engine():
 
 def sycl_path(path) -> str:
     """A host path as the engine's container sees it: the folder above the Strata checkout (or STRATA_SYCL_ROOT) is
-    mounted at /work."""
+    mounted at /work.  On Windows the engine runs on the host: the path stays as it is."""
+    if S.WIN:
+        return str(Path(path).resolve())
     p, root = Path(path).resolve(), MOUNT.resolve()
     try:
         return "/work/" + p.relative_to(root).as_posix()
@@ -357,6 +387,14 @@ def to_sycl(cfg: dict, exe: Path, ram: float, keep: dict, vram_gb: float = 0.0, 
         else:
             args += ["--prefill", new_prefill]
     out = {k: v for k, v in cfg.items() if k not in ("lib_dirs", "env", "gpus")}   # "vision" stays: the CPU reader runs on the host
+    if S.WIN:
+        # no container: the engine itself, and strata-sycl.sh's settings in the config (the selector is set by write_run_script)
+        from strata_control import sycl_windows
+        out.update({"backend": "sycl", "exe": str(exe), "args": args, "lib_dirs": []})
+        env = {k: v for k, v in sycl_windows.engine_env("alchemist" if alchemist else "").items() if k != "ONEAPI_DEVICE_SELECTOR"}
+        out["env"] = env
+        out.update(keep)
+        return out
     out.update({"backend": "sycl", "exe": str(SYCL_WRAPPER), "args": args, "sycl_root": str(MOUNT)})
     env = {}
     if alchemist:
@@ -379,8 +417,11 @@ def to_sycl(cfg: dict, exe: Path, ram: float, keep: dict, vram_gb: float = 0.0, 
 
 
 def install(argv) -> None:
-    intel = [] if S.WIN else intel_gpus()
+    intel = intel_gpus()
     if not intel:
+        if S.WIN:
+            S.fail("no Intel Arc card found among the display adapters (integrated Intel graphics are not one)",
+                   "install Intel's Arc graphics driver; on an NVIDIA or AMD card, run START-HERE.bat")
         S.fail("no Intel Arc found (an xe or i915 card in /sys/class/drm)", "on an NVIDIA or AMD card, run ./setup.sh")
     exe, why = sycl_engine()
     if exe is None:
@@ -481,7 +522,21 @@ def install(argv) -> None:
                       auto_reserve=not asked_reserve, fit=not split)
         for line in fit_notes:                              # one plain line: what was chosen and why (never a refusal)
             S.say("  " + line)
-        if len(intel) > 1:                                  # pin the SYCL device(s)
+        if S.WIN:
+            # Windows: the Level Zero order is not the display adapters' order, and Intel integrated graphics is a Level Zero
+            # GPU too, so the card is found by name in sycl-ls (the package carries it); without a match every Level Zero
+            # GPU is offered and the engine takes the first (docs/INTEL_ARC.md, "Windows")
+            from strata_control import sycl_windows
+            selector = "level_zero:gpu"
+            if not split:
+                lz = sycl_windows.level_zero_index(sycl_windows.sycl_ls_output(exe.parent), sel["name"])
+                if lz is not None:
+                    selector = f"level_zero:{lz}"
+                else:
+                    S.say(f"  sycl-ls did not name the {sel['name']}: the engine takes the first Intel GPU. With Intel integrated "
+                          "graphics enabled, set ONEAPI_DEVICE_SELECTOR=level_zero:N in the config's env (N from sycl-ls)")
+            cfg.setdefault("env", {}).setdefault("ONEAPI_DEVICE_SELECTOR", selector)
+        elif len(intel) > 1:                                # pin the SYCL device(s)
             # the Level Zero order followed the sysfs card order on the tested machines; a machine where it does not
             # needs an explicit ONEAPI_DEVICE_SELECTOR (kept if the user set one)
             selector = "level_zero:*" if split else f"level_zero:{idx}"
@@ -494,7 +549,8 @@ def install(argv) -> None:
             # computes those experts).  Only when the experts will likely not fit; a value the user set is kept.
             cards = [intel[i]["vram_gb"] for i in gsel if isinstance(i, int) and 0 <= i < len(intel)]
             arena = S.MODELS.get(model, {}).get("arena_gb", 0)
-            if split_likely_short(arena, cards) and "STRATA_VERIFY_NO_HOST" not in cfg["env"]:
+            # (on Windows the "1" in the config is to_sycl's default, standing in for strata-sycl.sh's: the rule may replace it)
+            if split_likely_short(arena, cards) and (S.WIN or "STRATA_VERIFY_NO_HOST" not in cfg["env"]):
                 cfg["env"]["STRATA_VERIFY_NO_HOST"] = "0"
                 S.say(f"  {model}'s {arena:.0f} GB of experts will likely not all fit the {len(cards)} cards' "
                       f"{sum(cards):.0f} GB of VRAM: the config sets STRATA_VERIFY_NO_HOST=0, so the CPU computes the "
@@ -523,6 +579,10 @@ def install(argv) -> None:
         cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8-sig"))
         if cfg.get("backend") != "sycl":
             return start(cfg_path, *a, **k)
+        if S.WIN:
+            script = S.home() / f"run-{Path(cfg_path).stem[len('strata-'):]}.bat"
+            S.say(f"\nstarting {script.name} ...")
+            sys.exit(subprocess.call(["cmd", "/c", str(script)]))
         script = ROOT / f"run-{Path(cfg_path).stem[len('strata-'):]}.sh"
         S.say(f"\nstarting {script.name} ...")
         os.execv("/bin/sh", ["/bin/sh", str(script)])

@@ -14,7 +14,8 @@ are still community reports. The NVIDIA and AMD engines are unchanged: the Intel
 use): you build it from source on Linux, as described below. The Docker route is a ready-made image,
 `ghcr.io/niko1221/strata:0.2.2-sycl`, which is published only for a release that carries a Linux Intel engine package; with none, [build
 the image yourself](DOCKER.md#build-it-yourself) from the engine you built (the image needs prepared model files; see
-[Docker: Intel Arc](DOCKER.md#intel-arc)). The Mac and Windows builds have no Intel engine.
+[Docker: Intel Arc](DOCKER.md#intel-arc)). The Mac has no Intel engine. Windows has a native build path (experimental, see
+[Windows](#windows)); it has not yet run on a real Arc under Windows.
 
 ## What has been run, and by whom
 
@@ -53,7 +54,7 @@ Full flags, per-request timings and engine logs are in the report linked in the 
 - **Unchanged:** the CUDA engine's greedy output, checked byte-identical against the gated 0.1.39 build (Q2_0 and Coder).
   The HIP build is not affected (the option is off by default).
 
-**Not tested by anyone yet:** Windows (no native build path; see below), Arc on WSL2 for the 0.1.39 port, integrated Arc
+**Not tested by anyone yet:** Windows (a native build path exists, see below, but nobody has built or run it on an Arc yet), Arc on WSL2 for the 0.1.39 port, integrated Arc
 GPUs (the B390 / Panther Lake in #515; the shared-memory planning does not exist yet), and pictures on a Battlemage card
 (the first picture on the Arc Pro B70 reset the GPU; they are off by default there, [INTEL.md](INTEL.md#pictures-on-an-arc-2026-10-19-branch-f-021-arcvis)).
 Pictures work on the A750 (on by default, read on the CPU). The Alchemist A-series was tested later, on an A750 (rows above and
@@ -170,11 +171,75 @@ Things that matter on an Arc (details in INTEL.md):
 
 ## Windows
 
-There is no Windows path yet. `setup --backend sycl` on Windows stops and points here. oneAPI exists for Windows,
-but `sycl/CMakeLists.txt` uses GCC-style flags (`-mavx512f`, `-fp-model=precise`, `-qmkl`) and the runner is a
-bash/Docker script, so a native Windows build would need work. Nobody has tried it. WSL2 with an Arc has been
-used by one tester (the B580 row above), but setup cannot detect the card there, because it reads `/sys/class/drm`,
-which WSL2 does not have.
+**Experimental and untested.** There is a native Windows build path now: no Docker, no WSL. It has been written to
+mirror the Linux build and the Windows AMD build, but **nobody has compiled it with oneAPI for Windows or run it on an
+Arc under Windows yet**. What was checked, and what was not, is listed at the end of this section. Reports are what
+moves it forward.
+
+### What you need
+
+- An Intel Arc card (A-series or B-series) with Intel's current Arc graphics driver. Integrated Intel graphics
+  (UHD, Iris Xe, the Core Ultra "Arc Graphics") is not used.
+- To build: the **Intel oneAPI Base Toolkit** for Windows (the DPC++/C++ compiler `icx` and oneMKL, 2025.0 or newer),
+  **Visual Studio 2022 Build Tools** with the C++ workload, CMake 3.24+, Ninja, Python 3.10+ and git. The PC that runs
+  the engine needs none of these: the zip carries the oneAPI DLLs.
+
+### Build it
+
+From a normal command prompt in the checkout:
+
+    sycl\tools\build_windows.bat
+
+It finds Visual Studio (vcvars64) and oneAPI (setvars.bat), configures `sycl/` with `icx` (and `cl` for ggml's C
+files, as llama.cpp's own Windows SYCL build does), builds `strata.exe` and packages
+`dist\strata-windows-x64-sycl.zip` and the folder `dist\strata-windows-x64-sycl\`: the engine, the oneAPI DLLs it
+needs (the SYCL runtime and its Level Zero adapter, oneMKL, the compiler runtime, the Visual C++ runtime), `sycl-ls.exe`
+and the licences. The packager follows the import tables and refuses the zip if a DLL a clean PC would miss is not in
+it. The Intel driver's own DLLs (`ze_loader.dll`, `ze_intel_gpu64.dll`, `OpenCL.dll`) are never shipped.
+
+Settings (environment variables): `AOT=bmg-g21` (B580, B570, Pro B60) or `AOT=bmg-g31` (Pro B70) compiles the device
+code ahead of time, as on Linux; without it the code is compiled for the card at the first start (about a minute), which
+is also what an A-series card needs. `I8_ESIMD=OFF` builds without the fused int8 kernels (#3219). `STRATA_SYCL_NATIVE=1`
+builds ggml-cpu for this PC's CPU instead of an AVX2 baseline. `sycl\tools\build_windows.bat tests` also builds the
+kernel parity tests.
+
+### Run it
+
+    START-HERE.bat --backend sycl [setup's options, e.g. --model IQ3_S]
+
+Setup finds the Arc among the display adapters, uses `dist\strata-windows-x64-sycl\strata.exe` (or the file
+`STRATA_SYCL_EXE` names) and writes a config that starts it directly, with the same model choice, reserve, context and
+prompt rules as on Linux (an A-series card streams its experts like the A770 on `xe`, with the driver's FP64 emulation).
+The settings that `strata-sycl.sh` gives the engine on Linux travel in the config's `"env"`:
+`STRATA_VERIFY_DEVICE_PLAN=1`, `STRATA_VERIFY_NO_HOST=1`, `STRATA_STAGER_THREADS=12`, `SYCL_CACHE_PERSISTENT=0`,
+`ZES_ENABLE_SYSMAN=1`.
+
+**Which GPU.** Intel integrated graphics is a Level Zero GPU too, and Windows does not number the GPUs the way the
+display adapters list them. Setup runs `sycl-ls` (the one in the zip) and sets `ONEAPI_DEVICE_SELECTOR=level_zero:N` for
+the Arc it names. When `sycl-ls` does not name it, the config says `level_zero:gpu` and the engine takes the first
+Intel GPU: with the integrated graphics enabled that can be the wrong one. Then set `ONEAPI_DEVICE_SELECTOR` in the
+config's `"env"` to the Arc's `level_zero:N` from `sycl-ls`, or turn the integrated graphics off in the BIOS.
+
+For the app and the Terminal, the folder becomes an engine package with
+`python packaging/package_engine.py --src dist/strata-windows-x64-sycl --backend sycl --platform windows-x86_64 --version <engine version> --arch bmg-g21 --out <components>/engine`;
+the Terminal then picks it for an Arc card (`strata_control/engine_component.py` reads the display adapters). No such
+package is published.
+
+### What was checked, and what was not
+
+- **Checked (on Linux, no Arc, no oneAPI for Windows):** the Linux build is unchanged (the generated Ninja build is
+  byte-identical to the one before). The Windows file reads of the port (`gguf_expert_source.cpp`) compile against the
+  Windows headers (MinGW-w64, syntax and types only). The Windows CMake branch configures as far as the oneMKL lookup.
+  The setup, card detection, Level Zero index and packaging logic have unit tests (`tools/test_setup_sycl.py`,
+  `tests/terminal/test_engine_component.py`).
+- **Not done yet:** a build with `icx` on Windows (the flags were translated from the Linux ones: `/fp:precise`, oneMKL
+  through its CMake package, CMake linking through `icx`; a first build will likely need fixes), the AOT build on
+  Windows, any run on an Arc under Windows (the device-side flag stores that need `STRATA_VERIFY_NO_HOST` on Linux `xe`
+  may behave differently on the Windows driver), pictures, the Monitor's GPU readings (they read Linux sysfs), and a
+  release package.
+
+WSL2 with an Arc has been used by one tester (the B580 row above), but setup cannot detect the card there, because it
+reads `/sys/class/drm`, which WSL2 does not have.
 
 ## Reporting a problem
 
